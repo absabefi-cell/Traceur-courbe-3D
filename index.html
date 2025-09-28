@@ -1,1 +1,295 @@
 
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <title>Courbes 3D animées — mobile + export fiable</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+  <style>
+    :root { color-scheme: light dark; }
+    body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
+    .wrap { display:grid; grid-template-columns:320px 1fr; gap:12px; min-height:100vh; }
+    @media (max-width: 900px){ .wrap{ grid-template-columns:1fr; } #plot{ height:70vh; } }
+    .panel { padding:12px; border-right:1px solid #ccc3; }
+    .row{ display:grid; grid-template-columns:1fr; gap:6px; margin-bottom:10px; }
+    .grid2{ display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+    input,select,button{ padding:8px; border-radius:10px; border:1px solid #9995; background:transparent; }
+    .btns{ display:flex; gap:8px; flex-wrap:wrap; margin-top:8px; }
+    #plot{ width:100%; height:100vh; }
+    .hint{ font-size:12px; opacity:.75; }
+    .status{ position:sticky; top:0; z-index:5; padding:6px 10px; font-size:12px; background:#0002; backdrop-filter: blur(4px); border-bottom:1px solid #9993; }
+    .badge{ display:inline-block; padding:3px 8px; border-radius:999px; border:1px solid #9995; margin-right:6px; }
+  </style>
+</head>
+<body>
+<div class="status">
+  <span class="badge" id="state">⏸️ Pause</span>
+  <span class="badge">p = <span id="pval">0.00</span></span>
+  <span class="badge">FPS ≈ <span id="fps">0</span></span>
+</div>
+
+<div class="wrap">
+  <div class="panel">
+    <h1>Courbe 3D animée</h1>
+
+    <div class="row">
+      <label>Préréglages</label>
+      <select id="preset">
+        <option value="helix">Hélice</option>
+        <option value="lissajous">Nœud de Lissajous</option>
+        <option value="trefoil">Nœud trèfle</option>
+        <option value="spherical">Spirale sphérique</option>
+        <option value="custom" selected>Personnalisé</option>
+      </select>
+    </div>
+
+    <div class="row"><label>x(t)</label><input id="fx" value="cos(t + p)"></div>
+    <div class="row"><label>y(t)</label><input id="fy" value="sin(t + p)"></div>
+    <div class="row">
+      <label>z(t)</label><input id="fz" value="0.2*t">
+      <div class="hint">Utilise <code>p</code> pour animer (ex: <code>sin(t+p)</code>). <code>t</code> parcourt la courbe.</div>
+    </div>
+
+    <div class="grid2">
+      <div class="row"><label>t min</label><input id="tmin" type="number" value="0" step="0.1"></div>
+      <div class="row"><label>t max</label><input id="tmax" type="number" value="12.566" step="0.1"></div>
+    </div>
+
+    <div class="grid2">
+      <div class="row"><label>Points</label><input id="samples" type="number" value="400" min="50" max="5000"></div>
+      <div class="row"><label>Vitesse (rad/s)</label><input id="speed" type="number" value="1.2" step="0.1"></div>
+    </div>
+
+    <div class="grid2">
+      <div class="row"><label>Épaisseur</label><input id="width" type="number" value="3" step="0.5"></div>
+      <div class="row"><label>Rayon marqueurs (0 = off)</label><input id="markers" type="number" value="0.1" step="1"></div>
+    </div>
+
+    <div class="grid2">
+      <div class="row">
+        <label>Auto-rotation caméra</label>
+        <select id="autorotate"><option value="on">On</option><option value="off" selected>on</option></select>
+      </div>
+      <div class="row"><label>Vitesse rotation cam</label><input id="camspeed" type="number" value="0.2" step="0.1"></div>
+    </div>
+
+    <div class="row">
+      <label>Bornes des axes (optionnel)</label>
+      <div class="grid2">
+        <input id="range" placeholder="ex: -5,5 (auto si vide)">
+        <input id="rangeZ" placeholder="Z: -5,5 (facultatif)">
+      </div>
+    </div>
+
+    <div class="btns">
+      <button id="play">▶️ Play</button>
+      <button id="pause">⏸️ Pause</button>
+      <button id="draw">🔄 Recalculer</button>
+      <button id="resetCam">🎯 Reset cam</button>
+      <button id="export">🖼️ Export PNG</button>
+      <button id="openimg">🖼️ Ouvrir l’image</button>
+    </div>
+
+    <p class="hint">
+      Fonctions: <code>sin, cos, tan, asin, acos, atan, sinh, cosh, tanh, exp, log, sqrt, abs</code>,
+      constantes <code>PI, E</code>, puissances avec <code>^</code> (auto → <code>**</code>).
+    </p>
+  </div>
+
+  <div id="plot"></div>
+</div>
+
+<script>
+  // --- mini "safeEval" ---
+  const M=Math;
+  const allowed={sin:M.sin,cos:M.cos,tan:M.tan,asin:M.asin,acos:M.acos,atan:M.atan,
+    sinh:M.sinh,cosh:M.cosh,tanh:M.tanh,exp:M.exp,log:M.log,sqrt:M.sqrt,abs:M.abs,
+    pow:M.pow,min:M.min,max:M.max,floor:M.floor,ceil:M.ceil,round:M.round,PI:M.PI,E:M.E};
+  function compileExpr(expr){
+    const args=["t","p",...Object.keys(allowed)];
+    const code=String(expr).replaceAll("^","**");
+    try{
+      // eslint-disable-next-line no-new-func
+      const fn=new Function(...args,`return (${code});`);
+      const f=(t,p)=>fn(t,p,...Object.values(allowed));
+      f(0,0); // test
+      return f;
+    }catch(e){
+      alert("Erreur dans l'expression: "+e.message);
+      return ()=>NaN;
+    }
+  }
+
+  const $=id=>document.getElementById(id);
+  const fx=$("fx"),fy=$("fy"),fz=$("fz");
+  const tmin=$("tmin"),tmax=$("tmax"),samples=$("samples");
+  const speed=$("speed"),width=$("width"),markers=$("markers");
+  const autorotate=$("autorotate"),camspeed=$("camspeed");
+  const range=$("range"),rangeZ=$("rangeZ"),preset=$("preset");
+  const pval=$("pval"), fpsEl=$("fps"), stateEl=$("state");
+
+  // Config Plotly avec bouton 📷 (modebar)
+  const PLOT_CFG = {
+    responsive: true,
+    displaylogo: false,
+    displayModeBar: true,
+    toImageButtonOptions: { format:'png', filename:'courbe3d', width:1400, height:1000, scale:1 }
+  };
+
+  let playing=false, p=0, lastTime=performance.now(), frames=0, lastFpsTime=performance.now();
+  let camAngle=0;
+
+  function parseRange(txt){
+    if(!txt) return null;
+    const v=txt.split(",").map(s=>Number(s.trim()));
+    return (v.length===2 && v.every(Number.isFinite)) ? v : null;
+  }
+
+  function layoutBase(){
+    const rx=parseRange(range.value), rz=parseRange(rangeZ.value);
+    return {
+      margin:{l:0,r:0,t:0,b:0},
+      scene:{
+        aspectmode:'cube',
+        xaxis:{title:'x',range:rx||undefined,zeroline:false},
+        yaxis:{title:'y',range:rx||undefined,zeroline:false},
+        zaxis:{title:'z',range:rz||undefined,zeroline:false}
+      },
+      showlegend:false
+    };
+  }
+
+  function buildData(pVal=0){
+    const fX=compileExpr(fx.value);
+    const fY=compileExpr(fy.value);
+    const fZ=compileExpr(fz.value);
+    const n=Math.max(50,Math.min(5000,Number(samples.value)||400));
+    const t0=Number(tmin.value)||0;
+    const t1=Number(tmax.value)||Math.PI*4;
+    const dt=(t1-t0)/(n-1);
+    const x=new Array(n), y=new Array(n), z=new Array(n);
+    for(let i=0;i<n;i++){
+      const t=t0+i*dt;
+      let X=fX(t,pVal), Y=fY(t,pVal), Z=fZ(t,pVal);
+      if(!isFinite(X)||!isFinite(Y)||!isFinite(Z)){ X=NaN; Y=NaN; Z=NaN; }
+      x[i]=X; y[i]=Y; z[i]=Z;
+    }
+    const showMarkers=(Number(markers.value)||0)>0;
+    return {
+      type:'scatter3d',
+      mode: showMarkers ? 'lines+markers' : 'lines',
+      x,y,z,
+      line:{width:Number(width.value)||3},
+      marker: showMarkers ? {size:Number(markers.value)||3} : undefined,
+      hoverinfo:'none'
+    };
+  }
+
+  let currentLayout=layoutBase();
+
+  async function drawOnce(){
+    const data=[buildData(p)];
+    currentLayout=layoutBase();
+    if(!window._plotted){
+      await Plotly.newPlot('plot', data, currentLayout, PLOT_CFG);
+      window._plotted=true;
+    }else{
+      await Plotly.react('plot', data, currentLayout, PLOT_CFG);
+    }
+  }
+
+  // --- Boucle: setInterval (très fiable sur Android) ---
+  const INTERVAL_MS = 33; // ~30 FPS
+  setInterval(()=>{
+    const now=performance.now();
+    const dt=(now - lastTime)/1000;
+    lastTime=now;
+
+    if(playing && window._plotted){
+      p += dt * Number(speed.value||1);
+      const d=buildData(p);
+      Plotly.update('plot', {x:[d.x], y:[d.y], z:[d.z]}, {}, [0]);
+      pval.textContent=p.toFixed(2);
+    }
+
+    if(autorotate.value==='on' && window._plotted){
+      camAngle += dt * Number(camspeed.value||0.2);
+      const r=1.6;
+      Plotly.relayout('plot', {'scene.camera.eye': {x:r*Math.cos(camAngle), y:r*Math.sin(camAngle), z:0.8}});
+    }
+
+    // FPS approx
+    frames++;
+    if(now - lastFpsTime > 1000){
+      fpsEl.textContent = frames.toString();
+      frames=0; lastFpsTime=now;
+    }
+  }, INTERVAL_MS);
+
+  // --- UI ---
+  $("play").onclick=()=>{
+    const usesP=(fx.value+fy.value+fz.value).toLowerCase().includes("p");
+    if(!usesP) alert("Play est actif, mais tes formules n'utilisent pas 'p'. Ajoute p (ex: sin(t+p)) pour animer.");
+    playing=true; stateEl.textContent="▶️ Play";
+  };
+  $("pause").onclick=()=>{ playing=false; stateEl.textContent="⏸️ Pause"; };
+  $("draw").onclick=()=>{ drawOnce(); };
+  $("resetCam").onclick=()=>{ Plotly.relayout('plot', {'scene.camera': {eye:{x:1.6,y:1.6,z:1.0}}}); };
+
+  // Export robuste: toImage() + lien + fallback
+  $("export").onclick = async ()=>{
+    try{
+      const dataUrl = await Plotly.toImage('plot', { format:'png', width:1400, height:1000, scale:1 });
+      const a = document.createElement('a');
+      a.href = dataUrl;
+      a.download = 'courbe3d.png';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      // Si Android ignore le téléchargement, on ouvre l'image en onglet
+      setTimeout(()=>{ if(!document.hidden) window.open(dataUrl, '_blank'); }, 250);
+    }catch(e){
+      try{
+        await Plotly.downloadImage('plot', {format:'png', width:1400, height:1000, filename:'courbe3d'});
+      }catch(e2){
+        alert("Export image bloqué par Chrome. Utilise le bouton 'Ouvrir l’image' ou l’icône 📷 en haut à droite.");
+      }
+    }
+  };
+
+  // Ouvrir l’image en onglet (enregistrer via appui long)
+  $("openimg").onclick = async ()=>{
+    const dataUrl = await Plotly.toImage('plot', { format:'png', width:1400, height:1000, scale:1 });
+    window.open(dataUrl, '_blank');
+  };
+
+  preset.onchange=()=>{
+    const v=preset.value;
+    if(v==='helix'){
+      fx.value="cos(t + p)"; fy.value="sin(t + p)"; fz.value="0.25*t";
+      tmin.value="0"; tmax.value=(Math.PI*8).toFixed(3);
+    }else if(v==='lissajous'){
+      fx.value="sin(3*t + p)"; fy.value="sin(4*t)"; fz.value="sin(5*t)";
+      tmin.value="0"; tmax.value=(Math.PI*6).toFixed(3);
+    }else if(v==='trefoil'){
+      fx.value="(2+cos(3*t+p))*cos(2*t)";
+      fy.value="(2+cos(3*t+p))*sin(2*t)";
+      fz.value="sin(3*t+p)";
+      tmin.value="0"; tmax.value=(Math.PI*2).toFixed(3);
+    }else if(v==='spherical'){
+      fx.value="cos(t)*cos(5*(t+p))";
+      fy.value="sin(t)*cos(5*(t+p))";
+      fz.value="sin(5*(t+p))";
+      tmin.value="-PI"; tmax.value="PI";
+    }
+    drawOnce();
+  };
+
+  // init
+  (async function init(){
+    await drawOnce();
+  })();
+</script>
+</body>
+</html>
